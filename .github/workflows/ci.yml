@@ -1,0 +1,136 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - 'helm/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - 'helm/**'
+      - '.github/workflows/ci.yml'
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY_PREFIX: devops-sample-apps
+
+permissions:
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+    
+    - name: Test Golang App
+      working-directory: ./golang
+      run: |
+        go mod tidy
+        go test -v -coverprofile=coverage.out ./...
+    
+    - name: Upload Go test coverage
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: go-coverage-report
+        path: ./golang/coverage.out
+    
+    - name: Test PHP App
+      working-directory: ./php
+      run: |
+        php -l index.php
+        echo "PHP syntax check passed"
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::594081136085:role/github-action-bot
+        role-session-name: github-actions-ci-cd
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        mask-password: true
+    
+    - name: Ensure ECR repositories exist
+      run: |
+        aws ecr create-repository --repository-name $ECR_REPOSITORY_PREFIX-golang --region $AWS_REGION || true
+        aws ecr create-repository --repository-name $ECR_REPOSITORY_PREFIX-php --region $AWS_REGION || true
+    
+    - name: Set short SHA
+      run: echo "SHORT_SHA=${GITHUB_SHA::5}" >> $GITHUB_ENV
+    
+    - name: Build and push Golang app
+      uses: docker/build-push-action@v6
+      with:
+        context: ./golang
+        push: true
+        tags: |
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_PREFIX }}-golang:${{ env.SHORT_SHA }}
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_PREFIX }}-golang:latest
+    
+    - name: Build and push PHP app
+      uses: docker/build-push-action@v6
+      with:
+        context: ./php
+        push: true
+        tags: |
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_PREFIX }}-php:${{ env.SHORT_SHA }}
+          ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_PREFIX }}-php:latest
+
+  paths-filter:
+    runs-on: ubuntu-latest
+    outputs:
+      helm: ${{ steps.filter.outputs.helm }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            helm:
+              - 'helm/**'
+
+  build-and-push-helm:
+    needs: [build-and-push, paths-filter]
+    runs-on: ubuntu-latest
+    if: needs.paths-filter.outputs.helm == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::594081136085:role/github-action-bot
+          role-session-name: github-actions-ci-cd
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: true
+      - name: Set short SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::5}" >> $GITHUB_ENV
+      - name: Build and push Helm charts
+        run: |
+          helm package ./helm/golang-app
+          helm package ./helm/php-app
+          helm push devops-sample-apps-golang-*.tgz oci://${{ steps.login-ecr.outputs.registry }}/
+          helm push devops-sample-apps-php-*.tgz oci://${{ steps.login-ecr.outputs.registry }}/ 
