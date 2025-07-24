@@ -1,7 +1,7 @@
 replicaCount: 2
 
 image:
-  repository: devops-sample-apps-php
+  repository: 594081136085.dkr.ecr.eu-north-1.amazonaws.com/devops-sample-apps-php
   pullPolicy: IfNotPresent
   tag: "latest"
 
@@ -12,7 +12,7 @@ fullnameOverride: ""
 serviceAccount:
   create: true
   annotations: {}
-  name: ""
+  name: "default"
 
 podAnnotations: {}
 
@@ -36,7 +36,7 @@ ingress:
   hosts:
     - host: devops-sample-apps.local
       paths:
-        - path: /api/v2/(.*)
+        - path: /api/v2/
           pathType: Prefix
 
 resources:
